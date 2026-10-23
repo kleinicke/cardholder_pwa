@@ -182,6 +182,13 @@ export class CardScannerComponent implements OnDestroy {
   private readonly stream = signal<MediaStream>(null);
 
   private decoders: IBarcodeDecoder[] = [];
+  /**
+   * Loaded once the camera shows frames, or for a picked photo, and kept
+   * across camera retries. Loading it while the camera starts would delay the
+   * first read of the decoders that are already there.
+   */
+  private tapirscan?: Promise<IBarcodeDecoder | null>;
+  private destroyed = false;
   /** Rotates through the decoders, one per frame, see decodeNextFrame. */
   private decoderIndex = 0;
   private loopSubscription: Subscription = null;
@@ -204,9 +211,11 @@ export class CardScannerComponent implements OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.destroyed = true;
     this.stopLoop();
     this.releaseStream();
     this.matBottomSheet.dismiss();
+    void this.tapirscan?.then((decoder) => decoder?.dispose?.());
   }
 
   /**
@@ -216,6 +225,7 @@ export class CardScannerComponent implements OnDestroy {
    */
   protected onVideoPlaying(): void {
     this.isStarting.set(false);
+    void this.addTapirscan();
   }
 
   protected close($event?: ICardScannerResult): void {
@@ -264,8 +274,13 @@ export class CardScannerComponent implements OnDestroy {
     this.stopLoop();
     try {
       const frame = await this.drawImage(file);
+      this.tapirscan ??= this.decodingService.loadTapirscan();
       const result = frame
-        ? await this.decodingService.decodeAll(frame, this.decoders)
+        ? await this.decodingService.decodeAll(
+            frame,
+            this.decoders,
+            this.tapirscan,
+          )
         : null;
       if (result) {
         this.onResult(result);
@@ -525,6 +540,21 @@ export class CardScannerComponent implements OnDestroy {
       cameras.find((device) => REAR_LABEL.test(device.label)) ||
       cameras[0]
     );
+  }
+
+  /**
+   * Joins tapirscan to the rotation once it has loaded, if it can. Runs again
+   * whenever the camera reopens; it is loaded and added only once.
+   */
+  private async addTapirscan(): Promise<void> {
+    this.tapirscan ??= this.decodingService.loadTapirscan();
+    const tapirscan = await this.tapirscan;
+    if (tapirscan && !this.destroyed && !this.decoders.includes(tapirscan)) {
+      this.decoders = this.decodingService.withTapirscan(
+        this.decoders,
+        tapirscan,
+      );
+    }
   }
 
   private startLoop(): void {
